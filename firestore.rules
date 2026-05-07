@@ -2,22 +2,22 @@ rules_version = '2';
 
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Default deny
+    // 0. Global Safety Net
     match /{document=**} {
       allow read, write: if false;
     }
 
-    // Global helpers
+    // Phase 3: Primitives & Global Helpers
     function isSignedIn() {
       return request.auth != null;
     }
 
-    function isEmailVerified() {
+    function isVerified() {
       return isSignedIn() && request.auth.token.email_verified == true;
     }
 
     function isValidId(id) {
-      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+      return id is string && id.size() > 0 && id.size() <= 128;
     }
 
     function incoming() {
@@ -28,59 +28,67 @@ service cloud.firestore {
       return resource.data;
     }
 
-    // Student Validation
+    // Student Blueprint
     function isValidStudent(data) {
       return data.keys().hasAll(['name', 'rollNumber', 'creatorId', 'createdAt']) &&
-             data.keys().size() == 4 &&
-             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
-             data.rollNumber is string && data.rollNumber.size() > 0 && data.rollNumber.size() <= 50 &&
+             data.keys().size() >= 4 && data.keys().size() <= 12 &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 200 &&
+             data.rollNumber is string && data.rollNumber.size() > 0 && data.rollNumber.size() <= 100 &&
              data.creatorId == request.auth.uid &&
              data.createdAt == request.time;
     }
 
-    // Document Validation
+    // Document Blueprint
     function isValidDocument(data) {
-      // Basic keys check
-      return data.keys().hasAll(['studentId', 'type', 'imageData', 'createdAt']) &&
+      return data.keys().hasAll(['studentId', 'creatorId', 'type', 'imageData', 'createdAt']) &&
+             data.keys().size() >= 5 && data.keys().size() <= 15 &&
              data.studentId is string &&
-             data.type in ['Aadhaar', 'PAN', '10th Marksheet', '12th Marksheet', 'Other'] &&
-             data.imageData is string && data.imageData.size() <= 1048576 && // 1MB limit check
+             data.creatorId == request.auth.uid &&
+             data.type is string && 
+             data.imageData is string && data.imageData.size() < 1048576 &&
              data.createdAt == request.time;
     }
 
+    // Pillar 1: The Master Gate (Relational Sync)
+    
     // Students Collection
     match /students/{studentId} {
-      allow create: if isEmailVerified() && isValidId(studentId) && isValidStudent(incoming());
+      allow create: if isVerified() && isValidStudent(incoming());
       
-      allow read: if isEmailVerified() && (
-        existing().creatorId == request.auth.uid
-      );
+      // Allow read if user is the creator
+      allow read: if isVerified() && existing().creatorId == request.auth.uid;
 
-      allow update: if isEmailVerified() && 
-        existing().creatorId == request.auth.uid &&
-        isValidStudent(incoming()) && (
-          // Action: Update Info
-          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'rollNumber', 'email'])
-        ) &&
-        incoming().creatorId == existing().creatorId && // Immutable creator
-        incoming().createdAt == existing().createdAt; // Immutable createdAt
+      allow update: if isVerified() && 
+                    existing().creatorId == request.auth.uid &&
+                    isValidStudent(incoming()) &&
+                    incoming().creatorId == existing().creatorId;
 
-      allow delete: if isEmailVerified() && existing().creatorId == request.auth.uid;
+      allow delete: if isVerified() && existing().creatorId == request.auth.uid;
 
       // Sub-collection: Documents
       match /documents/{docId} {
-        allow create: if isEmailVerified() && 
-                      isValidId(docId) && 
+        // Pillar 8: Secure List Queries (No get() inside list for performance)
+        allow list: if isVerified() && (
+          (resource.data.creatorId == request.auth.uid) ||
+          // Fallback for legacy documents: Only use get() if creatorId is missing from data
+          (!("creatorId" in resource.data) && get(/databases/$(database)/documents/students/$(studentId)).data.creatorId == request.auth.uid)
+        );
+
+        // Pillar 1: Master Gate for single-document read
+        allow get: if isVerified() && (
+          (resource.data.creatorId == request.auth.uid) ||
+          (get(/databases/$(database)/documents/students/$(studentId)).data.creatorId == request.auth.uid)
+        );
+
+        allow create: if isVerified() && 
                       isValidDocument(incoming()) &&
+                      incoming().studentId == studentId &&
                       get(/databases/$(database)/documents/students/$(studentId)).data.creatorId == request.auth.uid;
 
-        allow read: if isEmailVerified() && 
-                    get(/databases/$(database)/documents/students/$(studentId)).data.creatorId == request.auth.uid;
-
-        allow update: if false; // Documents are immutable for simplicity/integrity
-        
-        allow delete: if isEmailVerified() && 
-                      get(/databases/$(database)/documents/students/$(studentId)).data.creatorId == request.auth.uid;
+        allow delete: if isVerified() && (
+          (resource.data.creatorId == request.auth.uid) ||
+          get(/databases/$(database)/documents/students/$(studentId)).data.creatorId == request.auth.uid
+        );
       }
     }
   }

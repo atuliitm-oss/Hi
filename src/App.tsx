@@ -14,7 +14,9 @@ import {
   History,
   CheckCircle2,
   XCircle,
-  X
+  X,
+  Share2,
+  MessageSquare
 } from 'lucide-react';
 import Papa from 'papaparse';
 import JSZip from 'jszip';
@@ -26,10 +28,12 @@ import {
   onSnapshot, 
   addDoc, 
   deleteDoc, 
+  getDocs,
   doc, 
   serverTimestamp,
   orderBy
 } from 'firebase/firestore';
+import { Mail, ShieldCheck } from 'lucide-react';
 import { signInWithPopup, GoogleAuthProvider, onAuthStateChanged, signOut, User } from 'firebase/auth';
 import { auth, db, handleFirestoreError, OperationType } from './lib/firebase';
 import { Student, StudentDocument, DocumentType } from './types';
@@ -48,6 +52,11 @@ export default function App() {
   const [isBulkUploadOpen, setIsBulkUploadOpen] = useState(false);
   const [isCameraOpen, setIsCameraOpen] = useState(false);
   const [isUploadDetailsOpen, setIsUploadDetailsOpen] = useState(false);
+  const [isBackupModalOpen, setIsBackupModalOpen] = useState(false);
+  const [backupEmail, setBackupEmail] = useState('');
+  const [isBackupLoading, setIsBackupLoading] = useState(false);
+  const [isStudentShareOpen, setIsStudentShareOpen] = useState(false);
+  const [sharingStudent, setSharingStudent] = useState<Student | null>(null);
   const [tempImage, setTempImage] = useState<string | null>(null);
   
   // Form States
@@ -267,19 +276,22 @@ export default function App() {
   };
 
   const deleteSelectedDocs = async () => {
-    if (!selectedStudent) return;
+    if (!selectedStudent || selectedDocIds.length === 0) return;
     
     setConfirmDialog({
       isOpen: true,
-      title: "Bulk Purge?",
-      message: `Are you sure you want to permanently delete ${selectedDocIds.length} selected documents?`,
+      title: selectedDocIds.length === 1 ? "Eliminate Asset?" : "Bulk Purge?",
+      message: selectedDocIds.length === 1 
+        ? "This document will be permanently removed from the secure vault."
+        : `Are you sure you want to permanently delete ${selectedDocIds.length} selected documents?`,
       variant: 'danger',
       onConfirm: async () => {
         try {
           const idsToDelete = [...selectedDocIds];
+          const studentId = selectedStudent.id;
           setSelectedDocIds([]);
           for (const id of idsToDelete) {
-            await deleteDoc(doc(db, `students/${selectedStudent.id}/documents`, id));
+            await deleteDoc(doc(db, `students/${studentId}/documents`, id));
           }
           setConfirmDialog(prev => ({ ...prev, isOpen: false }));
         } catch (err) {
@@ -295,6 +307,7 @@ export default function App() {
     try {
       await addDoc(collection(db, `students/${selectedStudent.id}/documents`), {
         studentId: selectedStudent.id,
+        creatorId: user.uid,
         type: docType,
         fileName: customName,
         imageData: tempImage,
@@ -306,6 +319,137 @@ export default function App() {
       handleFirestoreError(err, OperationType.CREATE, `students/${selectedStudent.id}/documents`);
     } finally {
       setUploading(false);
+    }
+  };
+
+  const handleFullBackup = async () => {
+    if (!user || !backupEmail) return;
+    setIsBackupLoading(true);
+    try {
+      const zip = new JSZip();
+      const mainFolder = zip.folder("StudenVault_Full_Backup");
+      
+      // Fetch all students
+      for (const student of students) {
+        try {
+          const q = query(
+            collection(db, `students/${student.id}/documents`), 
+            where("creatorId", "==", user.uid)
+          );
+          const docsSnap = await getDocs(q);
+          
+          docsSnap.forEach((doc) => {
+            const data = doc.data() as StudentDocument;
+            const base64Data = data.imageData.includes(',') ? data.imageData.split(',')[1] : data.imageData;
+            studentFolder?.file(`${data.fileName || data.type}_${doc.id}.jpg`, base64Data, { base64: true });
+          });
+        } catch (err) {
+          handleFirestoreError(err, OperationType.LIST, `students/${student.id}/documents`);
+        }
+      }
+
+      const zipBlob = await zip.generateAsync({ type: "blob" });
+      
+      const reader = new FileReader();
+      reader.readAsDataURL(zipBlob);
+      reader.onloadend = async () => {
+        const base64Content = (reader.result as string).split(',')[1];
+        
+        const response = await fetch('/api/backup-email', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: backupEmail,
+            zipBase64: base64Content,
+            filename: `VaultBackup_${new Date().toISOString().split('T')[0]}.zip`
+          })
+        });
+
+        const result = await response.json();
+        if (response.ok) {
+          alert(result.message);
+          setIsBackupModalOpen(false);
+          setBackupEmail('');
+        } else {
+          throw new Error(result.error || "Backup failed");
+        }
+      };
+    } catch (err: any) {
+      console.error("Backup failed:", err);
+      alert("Error: " + err.message);
+    } finally {
+      setIsBackupLoading(false);
+    }
+  };
+
+  const exportStudentArchive = async (student: Student, mode: 'download' | 'share') => {
+    setUploading(true);
+    try {
+      const zip = new JSZip();
+      const folder = zip.folder(`${student.name}_Archive`);
+      
+      let docsSnap;
+      try {
+        const q = query(
+          collection(db, `students/${student.id}/documents`), 
+          where("creatorId", "==", user.uid)
+        );
+        docsSnap = await getDocs(q);
+      } catch (err) {
+        handleFirestoreError(err, OperationType.LIST, `students/${student.id}/documents`);
+        return;
+      }
+
+      if (docsSnap.empty) {
+        alert("No documents found for this student.");
+        return;
+      }
+
+      docsSnap.forEach((doc) => {
+        const data = doc.data() as StudentDocument;
+        const base64Data = data.imageData.includes(',') ? data.imageData.split(',')[1] : data.imageData;
+        folder?.file(`${data.fileName || data.type}.jpg`, base64Data, { base64: true });
+      });
+
+      const zipBlob = await zip.generateAsync({ type: "blob" });
+      const filename = `${student.name.replace(/\s+/g, '_')}_Vault.zip`;
+
+      if (mode === 'download') {
+        const url = URL.createObjectURL(zipBlob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+      } else {
+        // Web Share API for WhatsApp/System Share
+        if (navigator.share) {
+          const file = new File([zipBlob], filename, { type: 'application/zip' });
+          try {
+            await navigator.share({
+              files: [file],
+              title: `${student.name} Documents`,
+              text: `Secure document archive for ${student.name} from StudenVault.`
+            });
+          } catch (err) {
+            // User cancelled or share failed
+            if ((err as Error).name !== 'AbortError') throw err;
+          }
+        } else {
+          // Fallback to WhatsApp Web link + manual download hint
+          const text = encodeURIComponent(`Hi, I am sharing the document archive for ${student.name}. Please download the ZIP file separately as my device doesn't support direct ZIP sharing via browser.`);
+          window.open(`https://wa.me/?text=${text}`, '_blank');
+          alert("Sharing ZIP directly via browser is not supported on this device. Opening WhatsApp to send details. Please use the 'Download' option to get the file first.");
+        }
+      }
+    } catch (err: any) {
+      console.error("Export failed:", err);
+      alert("Error: " + err.message);
+    } finally {
+      setUploading(false);
+      setIsStudentShareOpen(false);
     }
   };
 
@@ -367,8 +511,19 @@ export default function App() {
               <p className="text-[10px] text-slate-400 font-mono tracking-wider">v2.4.0 • ACCREDITED ARCHIVE</p>
             </div>
           </div>
-          <div className="flex items-center gap-4">
-            <div className="text-right hidden sm:block">
+          <div className="flex items-center gap-2 sm:gap-4">
+            <button 
+              onClick={() => {
+                setBackupEmail(user.email || '');
+                setIsBackupModalOpen(true);
+              }}
+              className="flex items-center gap-2 bg-slate-900 text-white px-3 sm:px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-600 transition-all shadow-md"
+            >
+              <ShieldCheck size={14} className={isBackupLoading ? 'animate-pulse' : ''} />
+              <span className="hidden xs:inline">Backup</span>
+              <span className="xs:hidden">Backup</span>
+            </button>
+            <div className="text-right hidden md:block">
               <p className="text-[10px] font-bold text-slate-400 uppercase tracking-tighter">Authenticated Agent</p>
               <p className="text-xs font-semibold">{user.email}</p>
             </div>
@@ -445,22 +600,74 @@ export default function App() {
                 </div>
               ) : (
                 filteredStudents.map((student) => (
-                  <button 
+                  <div 
                     key={student.id}
+                    role="button"
+                    tabIndex={0}
                     onClick={() => setSelectedStudent(student)}
-                    className={`w-full text-left p-4 hover:bg-indigo-50/50 transition-colors flex items-center justify-between group ${selectedStudent?.id === student.id ? 'bg-indigo-50 border-l-4 border-indigo-600' : ''}`}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        setSelectedStudent(student);
+                      }
+                    }}
+                    onMouseDown={(e) => {
+                      if (e.button !== 0) return;
+                      longPressTimer.current = setTimeout(() => {
+                        if (window.navigator.vibrate) window.navigator.vibrate(50);
+                        setSharingStudent(student);
+                        setIsStudentShareOpen(true);
+                      }, 700);
+                    }}
+                    onMouseUp={() => {
+                      if (longPressTimer.current) {
+                        clearTimeout(longPressTimer.current);
+                        longPressTimer.current = null;
+                      }
+                    }}
+                    onMouseLeave={() => {
+                      if (longPressTimer.current) {
+                        clearTimeout(longPressTimer.current);
+                        longPressTimer.current = null;
+                      }
+                    }}
+                    onTouchStart={() => {
+                      longPressTimer.current = setTimeout(() => {
+                        if (window.navigator.vibrate) window.navigator.vibrate(50);
+                        setSharingStudent(student);
+                        setIsStudentShareOpen(true);
+                      }, 700);
+                    }}
+                    onTouchEnd={() => {
+                      if (longPressTimer.current) {
+                        clearTimeout(longPressTimer.current);
+                        longPressTimer.current = null;
+                      }
+                    }}
+                    className={`w-full text-left p-4 hover:bg-indigo-50/50 transition-colors flex items-center justify-between group cursor-pointer outline-none ${selectedStudent?.id === student.id ? 'bg-indigo-50 border-l-4 border-indigo-600' : ''}`}
                   >
                     <div className="flex items-center gap-3">
-                      <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-xs ${selectedStudent?.id === student.id ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-400'}`}>
+                      <div className={`w-10 h-10 rounded-full flex items-center justify-center font-bold text-xs shrink-0 ${selectedStudent?.id === student.id ? 'bg-indigo-600 text-white' : 'bg-slate-100 text-slate-400'}`}>
                         {student.name.charAt(0)}
                       </div>
-                      <div>
-                        <h4 className="text-xs font-bold text-slate-900 uppercase truncate max-w-[180px]">{student.name}</h4>
+                      <div className="min-w-0">
+                        <h4 className="text-xs font-bold text-slate-900 uppercase truncate max-w-[140px] sm:max-w-[180px]">{student.name}</h4>
                         <p className="text-[10px] text-slate-500 font-mono">ID: {student.rollNumber}</p>
                       </div>
                     </div>
-                    <ChevronRight size={14} className={`text-slate-300 transition-transform ${selectedStudent?.id === student.id ? 'translate-x-1 text-indigo-600' : 'opacity-0 group-hover:opacity-100'}`} />
-                  </button>
+                    <div className="flex items-center gap-2">
+                      <button 
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSharingStudent(student);
+                          setIsStudentShareOpen(true);
+                        }}
+                        className="p-2 text-slate-300 hover:text-indigo-600 opacity-0 group-hover:opacity-100 transition-all sm:hidden lg:inline-block cursor-pointer flex items-center justify-center"
+                      >
+                        <Share2 size={14} />
+                      </button>
+                      <ChevronRight size={14} className={`text-slate-300 transition-transform ${selectedStudent?.id === student.id ? 'translate-x-1 text-indigo-600' : 'opacity-0 group-hover:opacity-100'}`} />
+                    </div>
+                  </div>
                 ))
               )}
             </div>
@@ -492,10 +699,21 @@ export default function App() {
                       <span>Archive Joined: <span className="text-slate-900">{selectedStudent.createdAt?.toDate().toLocaleDateString()}</span></span>
                     </div>
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
+                    <button 
+                      onClick={() => {
+                        setSharingStudent(selectedStudent);
+                        setIsStudentShareOpen(true);
+                      }}
+                      className="bg-white border border-slate-200 text-slate-600 px-4 py-3 rounded-xl text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 hover:bg-slate-50 transition-all"
+                      title="Share Archive"
+                    >
+                      <Share2 size={14} />
+                      <span className="hidden sm:inline">Export</span>
+                    </button>
                     <button 
                       onClick={() => deleteStudent(selectedStudent.id)}
-                      className="bg-white border border-red-200 text-red-500 px-4 py-3 rounded-xl hover:bg-red-50 transition-all flex items-center justify-center"
+                      className="bg-white border border-red-100 text-red-500 px-4 py-3 rounded-xl hover:bg-red-50 transition-all flex items-center justify-center shadow-sm"
                       title="Purge Student Record"
                     >
                       <Trash2 size={18} />
@@ -505,53 +723,54 @@ export default function App() {
                       className="bg-indigo-600 text-white px-5 py-3 rounded-xl text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 hover:bg-indigo-500 hover:scale-105 transition-all shadow-lg shadow-indigo-100"
                     >
                       <CameraIcon size={14} />
-                      Scan New Document
+                      <span className="hidden sm:inline">New Document</span>
+                      <span className="sm:hidden">Scan</span>
                     </button>
-                    <label className="bg-white border border-slate-200 text-slate-600 px-5 py-3 rounded-xl text-[10px] font-bold uppercase tracking-widest flex items-center gap-2 cursor-pointer hover:border-indigo-400 hover:text-indigo-600 transition-all">
-                      <Upload size={14} />
-                      Upload
-                      <input type="file" className="hidden" accept="image/*" onChange={uploadFile} />
-                    </label>
                   </div>
                 </div>
 
-                {/* Bulk Actions Bar */}
+                {/* Bulk Actions Bar - Compact & Floating Style */}
                 <AnimatePresence>
                   {selectedDocIds.length > 0 && (
                     <motion.div 
-                      initial={{ height: 0, opacity: 0 }}
-                      animate={{ height: 'auto', opacity: 1 }}
-                      exit={{ height: 0, opacity: 0 }}
-                      className="overflow-hidden"
+                      initial={{ y: 50, opacity: 0 }}
+                      animate={{ y: 0, opacity: 1 }}
+                      exit={{ y: 50, opacity: 0 }}
+                      className="fixed bottom-8 left-1/2 -translate-x-1/2 z-50 w-full max-w-2xl px-4 sm:px-6"
                     >
-                      <div className="bg-indigo-600 p-4 rounded-2xl shadow-xl shadow-indigo-100 flex items-center justify-between">
-                        <div className="flex items-center gap-4 text-white pl-2">
-                          <CheckCircle2 size={24} />
-                          <div>
-                            <p className="text-xs font-black uppercase tracking-widest leading-none mb-1">{selectedDocIds.length} Assets Selected</p>
-                            <p className="text-[10px] font-medium text-indigo-200">Prepare for batch processing</p>
+                      <div className="bg-slate-900 text-white p-3 sm:p-4 rounded-2xl shadow-2xl flex items-center justify-between border border-white/10 backdrop-blur-xl bg-opacity-95">
+                        <div className="flex items-center gap-3 pl-1 sm:pl-2">
+                          <div className="w-8 h-8 bg-indigo-600 rounded-lg flex items-center justify-center font-black text-xs shrink-0">
+                            {selectedDocIds.length}
+                          </div>
+                          <div className="hidden sm:block">
+                            <p className="text-[10px] font-black uppercase tracking-widest leading-none mb-1">Selected Assets</p>
+                            <p className="text-[10px] font-medium text-slate-400 hidden md:block">Queue active for bulk processing</p>
                           </div>
                         </div>
-                        <div className="flex gap-2">
+                        <div className="flex items-center gap-1.5 sm:gap-2">
                           <button 
                             onClick={() => setSelectedDocIds([])}
-                            className="px-4 py-2 text-[10px] font-bold uppercase text-indigo-100 hover:text-white"
+                            className="px-3 sm:px-4 py-2 text-[10px] font-bold uppercase text-slate-400 hover:text-white transition-colors"
                           >
-                            Cancel
+                            <span className="hidden sm:inline">Dismiss</span>
+                            <span className="sm:hidden">Cancel</span>
                           </button>
                           <button 
                             onClick={batchDownload}
-                            className="bg-white/10 text-white border border-white/20 px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-white/20 transition-all flex items-center gap-2"
+                            className="bg-white/10 text-white px-3 sm:px-5 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-white/20 transition-all flex items-center gap-2"
+                            title="Export Selected"
                           >
                             <Download size={14} />
-                            Download ZIP
+                            <span className="hidden sm:inline">Export</span>
                           </button>
                           <button 
                             onClick={deleteSelectedDocs}
-                            className="bg-white text-indigo-600 px-6 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-indigo-50 transition-all flex items-center gap-2"
+                            className="bg-red-500 text-white px-3 sm:px-5 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-red-600 transition-all flex items-center gap-2 shadow-lg shadow-red-500/20"
+                            title="Delete Selected"
                           >
                             <Trash2 size={14} />
-                            Purge Selection
+                            <span className="hidden sm:inline">Purge</span>
                           </button>
                         </div>
                       </div>
@@ -578,17 +797,42 @@ export default function App() {
                         <motion.div 
                           key={sDoc.id}
                           layout
-                          onMouseDown={() => {
-                            longPressTimer.current = setTimeout(() => handleLongPress(sDoc.id), 700);
+                          onMouseDown={(e) => {
+                            if (e.button !== 0) return;
+                            longPressTimer.current = setTimeout(() => {
+                              if (window.navigator.vibrate) window.navigator.vibrate(50);
+                              handleLongPress(sDoc.id);
+                            }, 700);
                           }}
                           onMouseUp={() => {
-                            if (longPressTimer.current) clearTimeout(longPressTimer.current);
+                            if (longPressTimer.current) {
+                              clearTimeout(longPressTimer.current);
+                              longPressTimer.current = null;
+                            }
+                          }}
+                          onMouseLeave={() => {
+                            if (longPressTimer.current) {
+                              clearTimeout(longPressTimer.current);
+                              longPressTimer.current = null;
+                            }
                           }}
                           onTouchStart={() => {
-                            longPressTimer.current = setTimeout(() => handleLongPress(sDoc.id), 700);
+                            longPressTimer.current = setTimeout(() => {
+                              if (window.navigator.vibrate) window.navigator.vibrate(50);
+                              handleLongPress(sDoc.id);
+                            }, 700);
                           }}
                           onTouchEnd={() => {
-                            if (longPressTimer.current) clearTimeout(longPressTimer.current);
+                            if (longPressTimer.current) {
+                              clearTimeout(longPressTimer.current);
+                              longPressTimer.current = null;
+                            }
+                          }}
+                          onTouchMove={() => {
+                            if (longPressTimer.current) {
+                              clearTimeout(longPressTimer.current);
+                              longPressTimer.current = null;
+                            }
                           }}
                           onClick={() => {
                             if (inSelectionMode) toggleSelect(sDoc.id);
@@ -744,6 +988,135 @@ export default function App() {
                   </button>
                 </div>
               </form>
+            </motion.div>
+          </div>
+        )}
+
+        {isBackupModalOpen && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => !isBackupLoading && setIsBackupModalOpen(false)}
+              className="absolute inset-0 bg-slate-900/40 backdrop-blur-md" 
+            />
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 20 }}
+              className="relative bg-white border border-slate-200 p-8 w-full max-w-md rounded-3xl shadow-2xl"
+            >
+              <div className="w-12 h-12 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mb-6">
+                <ShieldCheck size={24} />
+              </div>
+              <h2 className="text-2xl font-black text-slate-900 uppercase tracking-tighter mb-2">Vault Export</h2>
+              <p className="text-xs text-slate-400 mb-8 font-medium">Generate a comprehensive ZIP archive of all student documents and transmit to a secure email address.</p>
+              
+              <div className="space-y-5">
+                <div>
+                  <label className="block text-[10px] uppercase font-black text-slate-400 mb-2 tracking-widest">Destination Email</label>
+                  <div className="relative">
+                    <Mail className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-300" size={14} />
+                    <input 
+                      type="email" 
+                      placeholder="e.g. backup@example.com"
+                      className="w-full pl-9 pr-4 py-3.5 bg-slate-50 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-indigo-100 transition-all font-medium"
+                      value={backupEmail}
+                      onChange={e => setBackupEmail(e.target.value)}
+                      disabled={isBackupLoading}
+                    />
+                  </div>
+                </div>
+
+                <div className="bg-amber-50 border border-amber-100 p-4 rounded-xl">
+                  <p className="text-[10px] text-amber-700 font-bold leading-relaxed">
+                    Note: This process may take several minutes depending on the total record volume. Do not close this window during the encryption and transmission sequence.
+                  </p>
+                </div>
+
+                <div className="pt-4 space-y-3">
+                  <button 
+                    onClick={handleFullBackup}
+                    disabled={isBackupLoading || !backupEmail}
+                    className="w-full bg-slate-900 text-white py-4 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-brand-primary transition-all shadow-lg shadow-slate-200 disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-3"
+                  >
+                    {isBackupLoading ? (
+                       <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1 }}>
+                        <Database size={16} />
+                      </motion.div>
+                    ) : 'Initiate Secure Backup'}
+                  </button>
+                  <button 
+                    disabled={isBackupLoading}
+                    onClick={() => setIsBackupModalOpen(false)} 
+                    className="w-full text-slate-400 py-3 text-[10px] font-bold uppercase tracking-widest hover:text-slate-600 disabled:opacity-30"
+                  >
+                    Abort Protocol
+                  </button>
+                </div>
+              </div>
+            </motion.div>
+          </div>
+        )}
+
+        {isStudentShareOpen && sharingStudent && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => !uploading && setIsStudentShareOpen(false)}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-md" 
+            />
+            <motion.div 
+              initial={{ scale: 0.95, opacity: 0, y: 30 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 30 }}
+              className="relative bg-white p-8 w-full max-w-sm rounded-[32px] shadow-2xl border border-white/20"
+            >
+              <div className="w-14 h-14 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center mb-6 shadow-sm">
+                <Share2 size={28} />
+              </div>
+              <h2 className="text-2xl font-black text-slate-900 uppercase tracking-tighter mb-1">Secure Export</h2>
+              <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-8">{sharingStudent.name}</p>
+              
+              <div className="grid grid-cols-1 gap-3">
+                <button 
+                  onClick={() => exportStudentArchive(sharingStudent, 'share')}
+                  disabled={uploading}
+                  className="w-full bg-slate-900 text-white py-4 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-indigo-600 transition-all flex items-center justify-center gap-3 shadow-xl disabled:opacity-50"
+                >
+                  <MessageSquare size={16} />
+                  WhatsApp / System Share
+                </button>
+                <button 
+                  onClick={() => exportStudentArchive(sharingStudent, 'download')}
+                  disabled={uploading}
+                  className="w-full bg-white border border-slate-200 text-slate-900 py-4 rounded-xl text-xs font-bold uppercase tracking-widest hover:bg-slate-50 transition-all flex items-center justify-center gap-3 disabled:opacity-50"
+                >
+                  <Download size={16} />
+                  Download Local ZIP
+                </button>
+                
+                <div className="mt-4 pt-4 border-t border-slate-100">
+                  <button 
+                    onClick={() => setIsStudentShareOpen(false)} 
+                    className="w-full text-slate-400 py-2 text-[10px] font-bold uppercase tracking-widest hover:text-slate-600"
+                  >
+                    Close Protocol
+                  </button>
+                </div>
+              </div>
+              
+              {uploading && (
+                <div className="absolute inset-0 bg-white/80 backdrop-blur-sm flex flex-col items-center justify-center rounded-[32px] z-10">
+                   <motion.div animate={{ rotate: 360 }} transition={{ repeat: Infinity, duration: 1 }}>
+                    <Database size={32} className="text-indigo-600" />
+                  </motion.div>
+                  <p className="text-[10px] font-black uppercase tracking-widest mt-4 text-slate-400">Compiling Vault...</p>
+                </div>
+              )}
             </motion.div>
           </div>
         )}
