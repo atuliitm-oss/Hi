@@ -16,7 +16,8 @@ import {
   XCircle,
   X,
   Share2,
-  MessageSquare
+  MessageSquare,
+  MessageCircle
 } from 'lucide-react';
 import Papa from 'papaparse';
 import JSZip from 'jszip';
@@ -58,6 +59,10 @@ export default function App() {
   const [isStudentShareOpen, setIsStudentShareOpen] = useState(false);
   const [sharingStudent, setSharingStudent] = useState<Student | null>(null);
   const [tempImage, setTempImage] = useState<string | null>(null);
+  
+  // Preview State
+  const [previewImage, setPreviewImage] = useState<string | null>(null);
+  const [previewType, setPreviewType] = useState<string>('');
   
   // Form States
   const [newStudentName, setNewStudentName] = useState('');
@@ -332,6 +337,7 @@ export default function App() {
       // Fetch all students
       for (const student of students) {
         try {
+          const studentFolder = mainFolder?.folder(student.name.replace(/[^a-zA-Z0-9]/g, '_'));
           const q = query(
             collection(db, `students/${student.id}/documents`), 
             where("creatorId", "==", user.uid)
@@ -380,6 +386,54 @@ export default function App() {
     } finally {
       setIsBackupLoading(false);
     }
+  };
+
+  const shareIndividualDocument = async (sDoc: StudentDocument) => {
+    try {
+      const filename = `${sDoc.type.replace(/\s+/g, '_')}.jpg`;
+      const base64Data = sDoc.imageData.includes(',') ? sDoc.imageData.split(',')[1] : sDoc.imageData;
+      
+      const byteCharacters = atob(base64Data);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+          byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      const blob = new Blob([byteArray], {type: 'image/jpeg'});
+      const file = new File([blob], filename, { type: 'image/jpeg' });
+
+      if (navigator.share && navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({
+          files: [file],
+          title: `Document: ${sDoc.type}`,
+          text: `Sharing ${sDoc.type} for ${selectedStudent?.name}`
+        });
+      } else {
+        const text = encodeURIComponent(`Hi, I'm sharing the ${sDoc.type} for ${selectedStudent?.name}. (Please download/share the image separately if direct link is restricted)`);
+        window.open(`https://wa.me/?text=${text}`, '_blank');
+      }
+    } catch (err) {
+      if ((err as Error).name !== 'AbortError') {
+        console.error("Share failed:", err);
+      }
+    }
+  };
+
+  const deleteOneDocument = async (docId: string, studentId: string, docLabel: string) => {
+    setConfirmDialog({
+      isOpen: true,
+      title: "Purge Document?",
+      message: `Are you sure you want to permanently delete the ${docLabel} record?`,
+      variant: 'danger',
+      onConfirm: async () => {
+        try {
+          await deleteDoc(doc(db, `students/${studentId}/documents`, docId));
+          setConfirmDialog(prev => ({ ...prev, isOpen: false }));
+        } catch(err) {
+          handleFirestoreError(err, OperationType.DELETE, 'document');
+        }
+      }
+    });
   };
 
   const exportStudentArchive = async (student: Student, mode: 'download' | 'share') => {
@@ -895,25 +949,62 @@ export default function App() {
                               </div>
                             )}
                           </div>
-                          <div className="p-5 flex justify-between items-start bg-white bg-gradient-to-b from-white to-slate-50/50">
-                            <div className="min-w-0 flex-1 pr-4">
-                              <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest mb-1 truncate">{sDoc.fileName || sDoc.type}</p>
-                              <div className="flex items-center gap-2">
-                                <History size={10} className="text-slate-300" />
-                                <p className="text-[10px] font-bold text-slate-600">{sDoc.createdAt?.toDate().toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</p>
+                          <div className="p-5 bg-white bg-gradient-to-b from-white to-slate-50/50">
+                            <div className="flex justify-between items-start mb-4">
+                              <div className="min-w-0 flex-1 pr-4">
+                                <p className="text-[10px] text-slate-400 uppercase font-black tracking-widest mb-1 truncate">{sDoc.fileName || sDoc.type}</p>
+                                <div className="flex items-center gap-2">
+                                  <History size={10} className="text-slate-300" />
+                                  <p className="text-[10px] font-bold text-slate-600">{sDoc.createdAt?.toDate().toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}</p>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-2 shrink-0">
+                                <button 
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setPreviewImage(sDoc.imageData);
+                                    setPreviewType(sDoc.type);
+                                  }}
+                                  className="w-8 h-8 bg-slate-50 border border-slate-100 rounded-lg flex items-center justify-center text-slate-400 hover:text-indigo-600 hover:bg-white hover:shadow-sm transition-all"
+                                  title="Quick View"
+                                >
+                                  <Search size={14} />
+                                </button>
+                                <a 
+                                  href={sDoc.imageData} 
+                                  download={`${selectedStudent.name}_${sDoc.type}.jpg`}
+                                  className="w-8 h-8 bg-slate-50 border border-slate-100 rounded-lg flex items-center justify-center text-slate-400 hover:text-indigo-600 hover:bg-white hover:shadow-sm transition-all"
+                                  title="Download"
+                                  onClick={(e) => e.stopPropagation()}
+                                >
+                                  <Download size={14} />
+                                </a>
                               </div>
                             </div>
-                            <div className="flex items-center gap-2 shrink-0">
-                              <a 
-                                href={sDoc.imageData} 
-                                download={`${selectedStudent.name}_${sDoc.type}.jpg`}
-                                className="w-8 h-8 bg-slate-50 border border-slate-100 rounded-lg flex items-center justify-center text-slate-400 hover:text-indigo-600 hover:bg-white hover:shadow-sm transition-all"
-                                title="Download"
-                                onClick={(e) => e.stopPropagation()}
+                            
+                            <div className="flex items-center gap-2 mt-2">
+                              {/* WhatsApp Share Button - Properly Visible Under Image */}
+                              <button 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  shareIndividualDocument(sDoc);
+                                }}
+                                className="flex-1 bg-emerald-500 text-white py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest flex items-center justify-center gap-2 hover:bg-emerald-600 transition-all shadow-lg shadow-emerald-100/50 active:scale-95"
                               >
-                                <Download size={14} />
-                              </a>
-                              <div className="text-[9px] font-mono font-bold text-slate-300 bg-slate-100/50 px-2 py-1 rounded-md border border-slate-100 uppercase tracking-tighter">#{(sDoc.id || '...').slice(0, 4)}</div>
+                                <MessageCircle size={16} />
+                                WhatsApp Share
+                              </button>
+                              
+                              <button 
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  deleteOneDocument(sDoc.id, selectedStudent.id, sDoc.type);
+                                }}
+                                className="w-10 h-10 border border-red-100 text-red-500 rounded-xl flex items-center justify-center hover:bg-red-50 transition-all"
+                                title="Delete"
+                              >
+                                <Trash2 size={16} />
+                              </button>
                             </div>
                           </div>
                         </motion.div>
@@ -1246,7 +1337,7 @@ export default function App() {
               <div className="flex justify-between items-center mb-8">
                 <div>
                   <h2 className="text-xl font-black text-slate-900 uppercase tracking-tighter">Bulk Registrar</h2>
-                  <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1">Batch Batch Processing</p>
+                  <p className="text-[10px] text-slate-400 font-bold uppercase tracking-widest mt-1">Batch Processing</p>
                 </div>
                 <button onClick={() => setIsBulkUploadOpen(false)} className="w-10 h-10 border border-slate-100 rounded-full flex items-center justify-center text-slate-400 hover:bg-slate-50">
                   <X size={20} />
@@ -1300,6 +1391,7 @@ export default function App() {
                                 await addDoc(collection(db, 'students'), {
                                   name: row.name,
                                   rollNumber: row.rollNumber,
+                                  creatorId: user.uid,
                                   createdAt: serverTimestamp()
                                 });
                                 count++;
@@ -1320,6 +1412,39 @@ export default function App() {
                   </div>
                 </div>
               </div>
+            </motion.div>
+          </div>
+        )}
+
+        {previewImage && (
+          <div className="fixed inset-0 z-[120] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setPreviewImage(null)}
+              className="absolute inset-0 bg-slate-900/95 backdrop-blur-md" 
+            />
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.9, opacity: 0 }}
+              className="relative w-full max-w-5xl max-h-[90vh] flex flex-col items-center"
+            >
+              <button 
+                onClick={() => setPreviewImage(null)}
+                className="absolute -top-12 right-0 text-white/60 hover:text-white transition-colors"
+              >
+                <X size={32} />
+              </button>
+              <div className="bg-white/5 rounded-2xl p-2 mb-4">
+                <p className="text-[10px] font-black uppercase tracking-[0.3em] text-white/40">{previewType}</p>
+              </div>
+              <img 
+                src={previewImage} 
+                alt="Document Preview" 
+                className="max-w-full max-h-[80vh] object-contain rounded-2xl shadow-[0_0_100px_rgba(0,0,0,0.5)]" 
+              />
             </motion.div>
           </div>
         )}
