@@ -1,0 +1,41 @@
+{
+  "entities": {
+    "Student": {
+      "title": "Student",
+      "description": "Student record in the vault",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string", "description": "Full name of the student" },
+        "rollNumber": { "type": "string", "description": "Unique roll number" },
+        "email": { "type": "string", "description": "Email address" },
+        "creatorId": { "type": "string", "description": "UID of the user who created this student" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp" }
+      },
+      "required": ["name", "rollNumber", "creatorId", "createdAt"]
+    },
+    "Document": {
+      "title": "Document",
+      "description": "Scanned document for a student",
+      "type": "object",
+      "properties": {
+        "studentId": { "type": "string", "description": "ID of the student" },
+        "type": { "type": "string", "enum": ["Aadhaar", "PAN", "10th Marksheet", "12th Marksheet", "Other"], "description": "Type of the document" },
+        "imageData": { "type": "string", "description": "Base64 encoded image data (optimized)" },
+        "fileName": { "type": "string", "description": "Original file name" },
+        "mimeType": { "type": "string", "description": "MIME type" },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Upload timestamp" }
+      },
+      "required": ["studentId", "type", "imageData", "createdAt"]
+    }
+  },
+  "firestore": {
+    "students": {
+      "schema": "Student",
+      "description": "Top-level collection for students"
+    },
+    "students/{studentId}/documents": {
+      "schema": "Document",
+      "description": "Sub-collection for student documents"
+    }
+  }
+}

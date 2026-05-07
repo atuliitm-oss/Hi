@@ -1,0 +1,8 @@
+{
+  "name": "Student DocVault",
+  "description": "A secure digital vault for students to scan, upload, and manage their educational certificates and identity documents.",
+  "requestFramePermissions": [
+    "camera"
+  ],
+  "majorCapabilities": []
+}

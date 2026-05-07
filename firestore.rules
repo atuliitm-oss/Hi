@@ -1,0 +1,87 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Global helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    // Student Validation
+    function isValidStudent(data) {
+      return data.keys().hasAll(['name', 'rollNumber', 'creatorId', 'createdAt']) &&
+             data.keys().size() == 4 &&
+             data.name is string && data.name.size() > 0 && data.name.size() <= 100 &&
+             data.rollNumber is string && data.rollNumber.size() > 0 && data.rollNumber.size() <= 50 &&
+             data.creatorId == request.auth.uid &&
+             data.createdAt == request.time;
+    }
+
+    // Document Validation
+    function isValidDocument(data) {
+      // Basic keys check
+      return data.keys().hasAll(['studentId', 'type', 'imageData', 'createdAt']) &&
+             data.studentId is string &&
+             data.type in ['Aadhaar', 'PAN', '10th Marksheet', '12th Marksheet', 'Other'] &&
+             data.imageData is string && data.imageData.size() <= 1048576 && // 1MB limit check
+             data.createdAt == request.time;
+    }
+
+    // Students Collection
+    match /students/{studentId} {
+      allow create: if isEmailVerified() && isValidId(studentId) && isValidStudent(incoming());
+      
+      allow read: if isEmailVerified() && (
+        existing().creatorId == request.auth.uid
+      );
+
+      allow update: if isEmailVerified() && 
+        existing().creatorId == request.auth.uid &&
+        isValidStudent(incoming()) && (
+          // Action: Update Info
+          incoming().diff(existing()).affectedKeys().hasOnly(['name', 'rollNumber', 'email'])
+        ) &&
+        incoming().creatorId == existing().creatorId && // Immutable creator
+        incoming().createdAt == existing().createdAt; // Immutable createdAt
+
+      allow delete: if isEmailVerified() && existing().creatorId == request.auth.uid;
+
+      // Sub-collection: Documents
+      match /documents/{docId} {
+        allow create: if isEmailVerified() && 
+                      isValidId(docId) && 
+                      isValidDocument(incoming()) &&
+                      get(/databases/$(database)/documents/students/$(studentId)).data.creatorId == request.auth.uid;
+
+        allow read: if isEmailVerified() && 
+                    get(/databases/$(database)/documents/students/$(studentId)).data.creatorId == request.auth.uid;
+
+        allow update: if false; // Documents are immutable for simplicity/integrity
+        
+        allow delete: if isEmailVerified() && 
+                      get(/databases/$(database)/documents/students/$(studentId)).data.creatorId == request.auth.uid;
+      }
+    }
+  }
+}
